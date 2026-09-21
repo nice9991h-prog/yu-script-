@@ -1,2 +1,386 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>YU💠 Admin</title><link rel="stylesheet" href="/styles.css"></head><body><main class="shell admin-shell"><section id="login" class="glass auth"><p class="eyebrow">YU💠 CONTROL CENTER</p><h1>Admin Login</h1><p class="muted">Manage your store securely.</p><input id="email" type="email" placeholder="Email"><input id="password" type="password" placeholder="Password"><button class="button" id="loginBtn">Sign in</button><p id="loginError" class="error"></p></section><section id="panel" hidden><header class="admin-head"><div><p class="eyebrow">YU💠 CONTROL CENTER</p><h1>Dashboard</h1></div><button class="button secondary" id="logout">Log out</button></header><div class="dash" id="dash"></div><div class="admin-grid"><section class="glass admin-card"><h2>Products</h2><form id="productForm"><input name="name" placeholder="Name" required><input name="category" placeholder="Scripts / UI / Tools / Premium" required><textarea name="description" placeholder="Description" required></textarea><div class="two"><input name="price" type="number" step=".01" placeholder="Price" required><input name="stock" type="number" placeholder="Stock" required></div><input name="imageUrl" placeholder="Image URL"><input name="downloadUrl" placeholder="Product/download URL"><button class="button">Add product</button></form><div id="productList"></div></section><section class="glass admin-card"><h2>Orders & Keys</h2><div id="orders"></div><h2>Site settings</h2><form id="settings"><input name="logo" placeholder="Logo"><input name="title" placeholder="Website title"><input name="bio" placeholder="Bio"><div class="two"><input name="projects" placeholder="Projects"><input name="likes" placeholder="Likes"></div><input name="comments" placeholder="Comments"><input name="socials" placeholder='Social links JSON'><textarea name="payment_instructions" placeholder="Payment instructions"></textarea><input name="payment_qr_url" placeholder="Payment QR URL"><button class="button">Save settings</button></form><div id="preview" class="preview"></div></section></div></section></main><script>const $=s=>document.querySelector(s),api=async(u,o={})=>{const r=await fetch(u,{headers:{'Content-Type':'application/json',...(o.headers||{})},...o}),d=await r.json();if(!r.ok)throw Error(d.error||'Request failed');return d},fd=f=>Object.fromEntries(new FormData(f));async function refresh(){const d=await api('/api/admin/dashboard');$('#dash').innerHTML=[['Total Products',d.products],['Total Stock',d.stock],['Total Orders',d.ordersCount],['Paid Orders',d.paidOrders],['Available Keys',d.availableKeys],['Used Keys',d.usedKeys]].map(x=>`<div class="glass metric"><small>${x[0]}</small><b>${x[1]}</b></div>`).join('');$('#productList').innerHTML=d.productRows.map(p=>`<div class="admin-row"><span><b>${p.name}</b><br><small>$${p.price.toFixed(2)} · ${p.stock} stock</small></span><span><button data-stock="${p.id}" data-n="1" class="button mini">+1</button><button data-stock="${p.id}" data-n="-1" class="button mini">−1</button><button data-del="${p.id}" class="danger">Delete</button></span></div>`).join('');document.querySelectorAll('[data-stock]').forEach(b=>b.onclick=()=>api('/api/admin/products/'+b.dataset.stock+'/stock',{method:'POST',body:JSON.stringify({amount:Number(b.dataset.n)})}).then(refresh));document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>api('/api/admin/products/'+b.dataset.del,{method:'DELETE'}).then(refresh));$('#orders').innerHTML=d.orders.map(o=>`<div class="admin-row"><span><b>${o.name}</b><br><small>${o.id.slice(0,8)}… · ${o.status}</small></span><span><select data-status="${o.id}"><option>Pending</option><option>Paid</option><option>Completed</option><option>Cancelled</option></select><button data-key="${o.id}" class="button mini">Key</button></span></div>`).join('');d.orders.forEach(o=>{const s=document.querySelector(`[data-status="${o.id}"]`);s.value=o.status;s.onchange=()=>api('/api/admin/orders/'+o.id+'/status',{method:'POST',body:JSON.stringify({status:s.value})}).then(refresh);document.querySelector(`[data-key="${o.id}"]`).onclick=()=>api('/api/admin/keys',{method:'POST',body:JSON.stringify({orderId:o.id})}).then(x=>alert('Key: '+x.key)).catch(e=>alert(e.message))});for(const[k,v]of Object.entries(d.settings)){const e=$(`#settings [name="${k}"]`);if(e)e.value=v}preview()}
-function preview(){const f=fd($('#settings'));$('#preview').innerHTML=`<small>Preview</small><h3>${f.logo||'YU💠'} · ${f.title||'Store'}</h3><p>${f.bio||'Designer who creates delightful experiences'}</p><span>${f.projects||0} Projects　${f.likes||0} Likes　${f.comments||0} Comments</span>`}$('#loginBtn').onclick=async()=>{try{await api('/api/admin/login',{method:'POST',body:JSON.stringify({email:$('#email').value,password:$('#password').value})});$('#login').hidden=true;$('#panel').hidden=false;refresh()}catch(e){$('#loginError').textContent=e.message}};$('#logout').onclick=()=>api('/api/admin/logout',{method:'POST'}).then(()=>location.reload());$('#productForm').onsubmit=async e=>{e.preventDefault();await api('/api/admin/products',{method:'POST',body:JSON.stringify(fd(e.target))});e.target.reset();refresh()};$('#settings').oninput=preview;$('#settings').onsubmit=async e=>{e.preventDefault();await api('/api/admin/settings',{method:'PUT',body:JSON.stringify(fd(e.target))});alert('Settings saved');refresh()};</script></body></html>
+import 'dotenv/config';
+import express from 'express';
+import helmet from 'helmet';
+import compression from 'compression';
+import cookieParser from 'cookie-parser';
+import rateLimit from 'express-rate-limit';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import Database from 'better-sqlite3';
+import crypto from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
+const jwtSecret = process.env.JWT_SECRET || 'dev-only-secret';
+const db = new Database(process.env.DB_FILE || 'yu-store.db');
+const allowedStatuses = ['Pending', 'Paid', 'Completed', 'Failed', 'Cancelled'];
+
+db.pragma('journal_mode = WAL');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS admins (
+    id INTEGER PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS products (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    category TEXT NOT NULL,
+    price INTEGER NOT NULL,
+    stock INTEGER NOT NULL DEFAULT 0,
+    image_url TEXT,
+    download_url TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS orders (
+    id TEXT PRIMARY KEY,
+    product_id INTEGER NOT NULL,
+    customer_email TEXT,
+    amount INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Pending',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(product_id) REFERENCES products(id)
+  );
+  CREATE TABLE IF NOT EXISTS payment_transactions (
+    id TEXT PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reference TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS purchase_keys (
+    id TEXT PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    product_id INTEGER NOT NULL,
+    key_hash TEXT UNIQUE NOT NULL,
+    status TEXT NOT NULL DEFAULT 'unused',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    used_at TEXT,
+    FOREIGN KEY(product_id) REFERENCES products(id)
+  );
+  CREATE TABLE IF NOT EXISTS site_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+`);
+
+const adminEmail = (process.env.ADMIN_EMAIL || 'admin@example.com').trim();
+const adminPassword = process.env.ADMIN_PASSWORD || 'change-me-now';
+const adminExists = db.prepare('SELECT id FROM admins WHERE email=?').get(adminEmail);
+if (!adminExists) {
+  db.prepare('INSERT INTO admins(email, password_hash) VALUES(?, ?)').run(adminEmail, bcrypt.hashSync(adminPassword, 12));
+}
+
+const settingsSeed = {
+  logo: 'YU💠',
+  title: 'YU💠 Store',
+  bio: 'Designer who creates delightful experiences',
+  projects: '144',
+  likes: '604',
+  comments: '44',
+  socials: JSON.stringify({ roblox: '#', youtube: '#', discord: '#', tiktok: '#', x: '#' }),
+  payment_instructions: process.env.PAYMENT_INSTRUCTIONS || 'Send payment using the QR code, then wait for admin confirmation.',
+  payment_qr_url: process.env.PAYMENT_QR_URL || ''
+};
+
+for (const [key, value] of Object.entries(settingsSeed)) {
+  db.prepare('INSERT OR IGNORE INTO site_settings(key, value) VALUES(?, ?)').run(key, String(value));
+}
+
+if (!db.prepare('SELECT id FROM products LIMIT 1').get()) {
+  const add = db.prepare('INSERT INTO products(name, description, category, price, stock, image_url, download_url) VALUES(?,?,?,?,?,?,?)');
+  [
+    ['Roblox Script Pack', 'Useful scripts for games and automation.', 'Scripts', 500, 10, 'https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=800', 'https://example.com/download/roblox-script-pack.zip'],
+    ['Custom UI Kit', 'Modern glass UI designs for your game.', 'UI', 700, 8, 'https://images.unsplash.com/photo-1558655146-9f40138edfeb?w=800', 'https://example.com/download/custom-ui-kit.zip'],
+    ['Premium Script Bundle', 'All scripts plus future updates.', 'Premium', 1500, 5, 'https://images.unsplash.com/photo-1518770660439-4636190af475?w=800', 'https://example.com/download/premium-script-bundle.zip']
+  ].forEach((row) => add.run(...row));
+}
+
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(compression());
+app.use(express.json({ limit: '100kb' }));
+app.use(cookieParser());
+
+const authLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again later.' }
+});
+
+const token = (id) => jwt.sign({ adminId: id }, jwtSecret, { expiresIn: '2h' });
+
+function auth(req, res, next) {
+  try {
+    const cookie = req.cookies && req.cookies.yu_admin;
+    if (!cookie) return res.status(401).json({ error: 'Authentication required' });
+    req.admin = jwt.verify(cookie, jwtSecret);
+    return next();
+  } catch (error) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+}
+
+function settingMap() {
+  return Object.fromEntries(
+    db.prepare('SELECT key, value FROM site_settings').all().map((x) => [x.key, x.value])
+  );
+}
+
+function publicProduct(product) {
+  return {
+    ...product,
+    price: Number(product.price) / 100,
+    active: !!product.active
+  };
+}
+
+function generateKeyValue() {
+  return 'YU-' + [1, 2, 3].map(() => crypto.randomBytes(2).toString('hex').toUpperCase()).join('-');
+}
+
+function issueKey(orderId, productId) {
+  const keyValue = generateKeyValue();
+  const hash = crypto.createHash('sha256').update(keyValue).digest('hex');
+  const existing = db.prepare('SELECT id FROM purchase_keys WHERE key_hash=?').get(hash);
+  if (existing) return issueKey(orderId, productId);
+  db.prepare('INSERT INTO purchase_keys(id, order_id, product_id, key_hash, status) VALUES(?,?,?,?,?)').run(
+    crypto.randomUUID(),
+    orderId,
+    productId,
+    hash,
+    'unused'
+  );
+  return keyValue;
+}
+
+app.get('/api/site', (req, res) => {
+  const settings = settingMap();
+  const products = db.prepare('SELECT * FROM products WHERE active=1 ORDER BY id DESC').all().map(publicProduct);
+  res.json({ settings, products });
+});
+
+app.post('/api/orders', (req, res) => {
+  const productId = Number(req.body.productId);
+  const email = String(req.body.email || '').trim();
+  const product = db.prepare('SELECT * FROM products WHERE id=? AND active=1').get(productId);
+
+  if (!product) return res.status(400).json({ error: 'Product not found' });
+  if (product.stock < 1) return res.status(400).json({ error: 'Product is out of stock' });
+
+  const orderId = crypto.randomUUID();
+  db.prepare('INSERT INTO orders(id, product_id, customer_email, amount, status) VALUES(?,?,?,?,?)').run(
+    orderId,
+    product.id,
+    email || null,
+    product.price,
+    'Pending'
+  );
+
+  db.prepare('INSERT INTO payment_transactions(id, order_id, provider, status, reference) VALUES(?,?,?,?,?)').run(
+    crypto.randomUUID(),
+    orderId,
+    'manual',
+    'Pending',
+    `manual-${orderId}`
+  );
+
+  res.status(201).json({
+    orderId,
+    amount: Number(product.price) / 100,
+    instructions: settingMap().payment_instructions || 'Send payment and wait for admin confirmation.',
+    qrUrl: settingMap().payment_qr_url || ''
+  });
+});
+
+app.post('/api/redeem', (req, res) => {
+  const rawKey = String(req.body.key || '').trim().toUpperCase();
+  if (!rawKey) return res.status(400).json({ error: 'Key is required' });
+
+  const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
+  const keyRecord = db.prepare(`
+    SELECT k.*, p.name AS product_name, p.download_url
+    FROM purchase_keys k
+    JOIN products p ON p.id = k.product_id
+    WHERE k.key_hash = ?
+  `).get(keyHash);
+
+  if (!keyRecord) {
+    return res.status(400).json({ error: 'Invalid key' });
+  }
+
+  if (keyRecord.status !== 'unused') {
+    return res.status(400).json({ error: 'Key has already been used' });
+  }
+
+  const affected = db.prepare('UPDATE purchase_keys SET status=?, used_at=CURRENT_TIMESTAMP WHERE id=? AND status=?').run('used', keyRecord.id, 'unused');
+
+  if (affected.changes !== 1) {
+    return res.status(400).json({ error: 'Key has already been used' });
+  }
+
+  return res.json({
+    productName: keyRecord.product_name,
+    downloadUrl: keyRecord.download_url || '#'
+  });
+});
+
+app.post('/api/admin/login', authLimit, (req, res) => {
+  const email = String(req.body.email || '').trim();
+  const password = String(req.body.password || '');
+  const admin = db.prepare('SELECT * FROM admins WHERE email=?').get(email);
+
+  if (!admin || !bcrypt.compareSync(password, admin.password_hash)) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  res.cookie('yu_admin', token(admin.id), {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 2 * 60 * 60 * 1000
+  });
+
+  return res.json({ ok: true });
+});
+
+app.post('/api/admin/logout', (req, res) => {
+  res.clearCookie('yu_admin');
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/dashboard', auth, (req, res) => {
+  const q = (sql) => db.prepare(sql).get();
+  const products = db.prepare('SELECT * FROM products ORDER BY id DESC').all();
+  const orders = db.prepare(`
+    SELECT o.*, p.name, p.price
+    FROM orders o
+    JOIN products p ON p.id = o.product_id
+    ORDER BY o.created_at DESC
+  `).all();
+
+  const productCount = q('SELECT COUNT(*) AS n FROM products').n;
+  const stockTotal = q('SELECT COALESCE(SUM(stock), 0) AS n FROM products').n;
+  const ordersCount = q('SELECT COUNT(*) AS n FROM orders').n;
+  const paidOrders = q("SELECT COUNT(*) AS n FROM orders WHERE status='Paid'").n;
+  const availableKeys = q("SELECT COUNT(*) AS n FROM purchase_keys WHERE status='unused'").n;
+  const usedKeys = q("SELECT COUNT(*) AS n FROM purchase_keys WHERE status='used'").n;
+
+  res.json({
+    products: Number(productCount),
+    stock: Number(stockTotal),
+    ordersCount: Number(ordersCount),
+    paidOrders: Number(paidOrders),
+    availableKeys: Number(availableKeys),
+    usedKeys: Number(usedKeys),
+    orders,
+    productRows: products,
+    settings: settingMap()
+  });
+});
+
+app.post('/api/admin/products', auth, (req, res) => {
+  const body = req.body || {};
+  const name = String(body.name || '').trim();
+  const description = String(body.description || '').trim();
+  const category = String(body.category || '').trim();
+  const price = Number(body.price || 0);
+  const stock = Math.max(0, Number(body.stock || 0));
+
+  if (!name || !description || !category) {
+    return res.status(400).json({ error: 'Name, description and category are required' });
+  }
+
+  const result = db.prepare('INSERT INTO products(name, description, category, price, stock, image_url, download_url) VALUES(?,?,?,?,?,?,?)').run(
+    name,
+    description,
+    category,
+    Math.round(price * 100),
+    stock,
+    body.imageUrl || '',
+    body.downloadUrl || ''
+  );
+
+  return res.status(201).json({ id: result.lastInsertRowid });
+});
+
+app.put('/api/admin/products/:id', auth, (req, res) => {
+  const body = req.body || {};
+  const id = Number(req.params.id);
+  db.prepare('UPDATE products SET name=?, description=?, category=?, price=?, stock=?, image_url=?, download_url=?, active=? WHERE id=?').run(
+    String(body.name || '').trim(),
+    String(body.description || '').trim(),
+    String(body.category || '').trim(),
+    Math.round(Number(body.price || 0) * 100),
+    Math.max(0, Number(body.stock || 0)),
+    body.imageUrl || '',
+    body.downloadUrl || '',
+    body.active === false ? 0 : 1,
+    id
+  );
+  res.json({ ok: true });
+});
+
+app.delete('/api/admin/products/:id', auth, (req, res) => {
+  db.prepare('UPDATE products SET active=0 WHERE id=?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/products/:id/stock', auth, (req, res) => {
+  const productId = Number(req.params.id);
+  const amount = Number(req.body.amount || 0);
+  const product = db.prepare('SELECT stock FROM products WHERE id=?').get(productId);
+  if (!product) return res.status(404).json({ error: 'Product not found' });
+  const next = Math.max(0, Number(product.stock) + Number(amount));
+  db.prepare('UPDATE products SET stock=? WHERE id=?').run(next, productId);
+  res.json({ ok: true, stock: next });
+});
+
+app.post('/api/admin/orders/:id/status', auth, (req, res) => {
+  const status = String(req.body.status || '').trim();
+  if (!allowedStatuses.includes(status)) {
+    return res.status(400).json({ error: 'Invalid status' });
+  }
+
+  db.prepare('UPDATE orders SET status=? WHERE id=?').run(status, req.params.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/keys', auth, (req, res) => {
+  const orderId = String(req.body.orderId || '').trim();
+  const order = db.prepare('SELECT * FROM orders WHERE id=? AND status IN ("Paid","Completed")').get(orderId);
+
+  if (!order) {
+    return res.status(400).json({ error: 'Order must be marked Paid or Completed before a key can be generated' });
+  }
+
+  const keyValue = issueKey(order.id, order.product_id);
+  res.json({ key: keyValue });
+});
+
+app.put('/api/admin/settings', auth, (req, res) => {
+  const allowed = ['logo', 'title', 'bio', 'projects', 'likes', 'comments', 'socials', 'payment_instructions', 'payment_qr_url'];
+  for (const key of allowed) {
+    if (req.body[key] !== undefined) {
+      db.prepare('INSERT INTO site_settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, String(req.body[key]));
+    }
+  }
+  res.json({ ok: true });
+});
+
+app.use(express.static(path.join(__dirname, 'public')));
+app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
+app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
+app.listen(process.env.PORT || 3000, () => {
+  console.log(`YU Store running on ${process.env.PORT || 3000}`);
+  console.log(`Admin email: ${adminEmail}`);
+});
+
+export default app;
