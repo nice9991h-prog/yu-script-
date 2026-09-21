@@ -1,225 +1,28 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>YU💠 Admin</title>
-  <link rel="stylesheet" href="/styles.css">
-</head>
-<body>
-  <main class="shell admin-shell">
-    <section id="login" class="glass auth">
-      <p class="eyebrow">YU💠 CONTROL CENTER</p>
-      <h1>Admin Login</h1>
-      <p class="muted">Manage your store securely.</p>
-      <input id="email" type="email" placeholder="Email"><br>
-      <input id="password" type="password" placeholder="Password"><br>
-      <button class="button" id="loginBtn">Sign in</button>
-      <p id="loginError" class="error"></p>
-    </section>
+# YU💠 Store
 
-    <section id="panel" hidden>
-      <header class="admin-head">
-        <div>
-          <p class="eyebrow">YU💠 CONTROL CENTER</p>
-          <h1>Dashboard</h1>
-        </div>
-        <button class="button secondary" id="logout">Log out</button>
-      </header>
+Full-stack blue glassmorphism digital store using Node.js, Express, SQLite, JWT cookies, bcrypt, and vanilla JavaScript. Sensitive state is server-side; no localStorage is used for authentication, orders, inventory, or keys.
 
-      <div class="dash" id="dash"></div>
+## Setup
+1. Install Node.js 20 or newer.
+2. Copy `.env.example` to `.env`.
+3. Set a random `JWT_SECRET` of at least 32 characters, plus an `ADMIN_USERNAME` and `ADMIN_PASSWORD` of at least 12 characters. Never commit `.env`.
+4. Run `npm install`.
+5. Run `npm start`.
+6. Open `http://localhost:3000/` for the storefront and `http://localhost:3000/admin` for the protected admin area.
 
-      <div class="admin-grid">
-        <section class="glass admin-card">
-          <h2>Products</h2>
-          <form id="productForm">
-            <input name="name" placeholder="Name" required>
-            <input name="category" placeholder="Scripts / UI / Tools / Premium" required>
-            <textarea name="description" placeholder="Description" required></textarea>
-            <div class="two">
-              <input name="price" type="number" step=".01" placeholder="Price" required>
-              <input name="stock" type="number" placeholder="Stock" required>
-            </div>
-            <input name="imageUrl" placeholder="Image URL">
-            <input name="downloadUrl" placeholder="Product/download URL">
-            <button class="button">Add product</button>
-          </form>
-          <div id="productList"></div>
-        </section>
+The first start creates `yu-store.db`, tables for users, products, orders, keys, and site settings, and seeds three sample products. Delete the database only when you intentionally want a fresh development seed.
 
-        <section class="glass admin-card">
-          <h2>Orders & Keys</h2>
-          <div id="orders"></div>
+## Payment and key workflow
+Customers create orders as `Pending`; no payment is faked. An authenticated admin changes an order to `Paid`. The server transaction verifies stock, decrements it once, and then an admin generates one cryptographically random key. Only a SHA-256 hash is used for validation; the raw key is returned once to the admin. Redemption atomically changes the key to redeemed and returns the product download URL. A key cannot be redeemed twice.
 
-          <h2>Site settings</h2>
-          <form id="settings">
-            <input name="logo" placeholder="Logo">
-            <input name="title" placeholder="Website title">
-            <input name="bio" placeholder="Bio">
-            <div class="two">
-              <input name="projects" placeholder="Projects">
-              <input name="likes" placeholder="Likes">
-            </div>
-            <input name="comments" placeholder="Comments">
-            <input name="socials" placeholder='Social links JSON'>
-            <textarea name="payment_instructions" placeholder="Payment instructions"></textarea>
-            <input name="payment_qr_url" placeholder="Payment QR URL">
-            <button class="button">Save settings</button>
-          </form>
+Supported admin order statuses are `Pending`, `Paid`, and `Cancelled`. Admin APIs require an HttpOnly JWT cookie and return 401 when unauthenticated. Product IDs, prices, stock, order status, and key operations are validated server-side with parameterized SQLite statements.
 
-          <div id="preview" class="preview"></div>
-        </section>
-      </div>
-    </section>
-  </main>
+## API summary
+Public: `GET /api/site`, `POST /api/orders`, `GET /api/orders/:id`, `POST /api/redeem`.
+Admin: `POST /api/admin/login`, `POST /api/admin/logout`, `GET/POST/PUT/DELETE /api/admin/products`, `PATCH /api/admin/products/:id/stock`, `GET /api/admin/orders`, `PATCH /api/admin/orders/:id/status`, `POST/GET /api/admin/keys`, `GET /api/admin/dashboard`, `PUT /api/admin/settings`.
 
-  <script>
-    const $ = (s) => document.querySelector(s);
-    const api = async (url, options = {}) => {
-      const response = await fetch(url, {
-        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-        ...options
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Request failed');
-      return data;
-    };
-    const fd = (form) => Object.fromEntries(new FormData(form));
+## Production checklist
+Use HTTPS, a secret manager, backups, a managed SQLite-compatible deployment for multiple instances, CSRF protection for cookie-authenticated deployments, real payment-provider webhooks, and real download storage/access controls. The included manual payment workflow deliberately requires human confirmation.
 
-    async function refresh() {
-      const d = await api('/api/admin/dashboard');
-
-      $('#dash').innerHTML = [
-        ['Total Products', d.products],
-        ['Total Stock', d.stock],
-        ['Total Orders', d.ordersCount],
-        ['Paid Orders', d.paidOrders],
-        ['Available Keys', d.availableKeys],
-        ['Used Keys', d.usedKeys]
-      ].map(([label, value]) => `
-        <div class="glass metric">
-          <small>${label}</small>
-          <b>${value}</b>
-        </div>
-      `).join('');
-
-      $('#productList').innerHTML = d.productRows.map((p) => `
-        <div class="admin-row">
-          <span>
-            <b>${p.name}</b><br>
-            <small>$${(Number(p.price) / 100).toFixed(2)} · ${p.stock} stock</small>
-          </span>
-          <span>
-            <button data-stock="${p.id}" data-n="1" class="button mini">+1</button>
-            <button data-stock="${p.id}" data-n="-1" class="button mini">−1</button>
-            <button data-del="${p.id}" class="danger">Delete</button>
-          </span>
-        </div>
-      `).join('');
-
-      document.querySelectorAll('[data-stock]').forEach((b) => {
-        b.onclick = () => api('/api/admin/products/' + b.dataset.stock + '/stock', {
-          method: 'POST',
-          body: JSON.stringify({ amount: Number(b.dataset.n) })
-        }).then(refresh);
-      });
-
-      document.querySelectorAll('[data-del]').forEach((b) => {
-        b.onclick = () => api('/api/admin/products/' + b.dataset.del, {
-          method: 'DELETE'
-        }).then(refresh);
-      });
-
-      $('#orders').innerHTML = d.orders.map((o) => `
-        <div class="admin-row">
-          <span>
-            <b>${o.name}</b><br>
-            <small>${o.id.slice(0, 8)}… · ${o.status}</small>
-          </span>
-          <span>
-            <select data-status="${o.id}">
-              <option ${o.status === 'Pending' ? 'selected' : ''}>Pending</option>
-              <option ${o.status === 'Paid' ? 'selected' : ''}>Paid</option>
-              <option ${o.status === 'Completed' ? 'selected' : ''}>Completed</option>
-              <option ${o.status === 'Failed' ? 'selected' : ''}>Failed</option>
-              <option ${o.status === 'Cancelled' ? 'selected' : ''}>Cancelled</option>
-            </select>
-            <button data-key="${o.id}" class="button mini">Key</button>
-          </span>
-        </div>
-      `).join('');
-
-      d.orders.forEach((o) => {
-        const select = document.querySelector(`[data-status="${o.id}"]`);
-        select.onchange = () => api('/api/admin/orders/' + o.id + '/status', {
-          method: 'POST',
-          body: JSON.stringify({ status: select.value })
-        }).then(refresh);
-
-        const button = document.querySelector(`[data-key="${o.id}"]`);
-        button.onclick = () => api('/api/admin/keys', {
-          method: 'POST',
-          body: JSON.stringify({ orderId: o.id })
-        }).then((x) => alert('Key: ' + x.key)).catch((error) => alert(error.message));
-      });
-
-      for (const [key, value] of Object.entries(d.settings)) {
-        const el = $(`#settings [name="${key}"]`);
-        if (el) el.value = value || '';
-      }
-
-      preview();
-    }
-
-    function preview() {
-      const formValues = fd($('#settings'));
-      $('#preview').innerHTML = `
-        <small>Preview</small>
-        <h3>${formValues.logo || 'YU💠'} · ${formValues.title || 'Store'}</h3>
-        <p>${formValues.bio || 'Designer who creates delightful experiences'}</p>
-        <span>${formValues.projects || 0} Projects　${formValues.likes || 0} Likes　${formValues.comments || 0} Comments</span>
-      `;
-    }
-
-    $('#loginBtn').onclick = async () => {
-      try {
-        await api('/api/admin/login', {
-          method: 'POST',
-          body: JSON.stringify({
-            email: $('#email').value,
-            password: $('#password').value
-          })
-        });
-        $('#login').hidden = true;
-        $('#panel').hidden = false;
-        refresh();
-      } catch (error) {
-        $('#loginError').textContent = error.message;
-      }
-    };
-
-    $('#logout').onclick = () => api('/api/admin/logout', { method: 'POST' }).then(() => location.reload());
-
-    $('#productForm').onsubmit = async (event) => {
-      event.preventDefault();
-      await api('/api/admin/products', {
-        method: 'POST',
-        body: JSON.stringify(fd(event.target))
-      });
-      event.target.reset();
-      refresh();
-    };
-
-    $('#settings').oninput = preview;
-    $('#settings').onsubmit = async (event) => {
-      event.preventDefault();
-      await api('/api/admin/settings', {
-        method: 'PUT',
-        body: JSON.stringify(fd(event.target))
-      });
-      alert('Settings saved');
-      refresh();
-    };
-  </script>
-</body>
-</html>
+## Verification note
+This repository can be verified locally with the commands above. Runtime/browser tests were not executed by the repository API editing session, so no unexecuted test is represented as passing here.
